@@ -1,188 +1,186 @@
 /* eslint-disable @typescript-eslint/no-explicit-any */
-import { useEffect, useMemo, useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import { ingest, nextStep, resetSession, type ApiResult } from "./api";
+import ChatTimeline, { type Turn } from "./components/ChatTimeline";
+import type { TutorTurn, StudentTurn } from "./types";
 
 function uid() {
   return Math.random().toString(36).slice(2, 10);
 }
 
+function tutorTextFromResult(res: ApiResult): string {
+  switch (res.action) {
+    case "OFFER_DIAGNOSTIC":
+      return "Before we jump into DSA, I recommend a quick diagnostic (5–8 items) to confirm prerequisites. You can skip if you prefer.";
+    case "ASK_QUESTION":
+      return "Let’s check your understanding with a quick question.";
+    case "REVIEW_PREREQ":
+      return "I’m seeing a gap in a prerequisite. Let’s review it briefly, then we’ll come back.";
+    case "ADVANCE":
+      return "Looks good. Advancing to the next concept.";
+    case "ANSWER_CONTENT":
+      return "Here’s a concise explanation:";
+    default:
+      return "Let’s continue.";
+  }
+}
+
 export default function App() {
   const [sessionId] = useState(() => `ui-${uid()}`);
-  const [log, setLog] = useState<string[]>([]);
-  const [result, setResult] = useState<ApiResult | null>(null);
-  const [answer, setAnswer] = useState<string>("");
+  const [turns, setTurns] = useState<Turn[]>([]);
+  const [busy, setBusy] = useState(false);
+  const [input, setInput] = useState("");
+    const startedRef = useRef(false);
 
-  // helper to append log
-  const pushLog = (line: string) =>
-    setLog((prev) => [...prev, `[${new Date().toLocaleTimeString()}] ${line}`]);
-
-  // start session once
+  // Start session with a tutor turn
   useEffect(() => {
+    if (startedRef.current) return;   // prevent StrictMode double-invoke
+    startedRef.current = true;
+
     (async () => {
-      pushLog(`Session: ${sessionId}`);
       const res = await ingest({ session_id: sessionId, action: "start" });
-      setResult(res);
-      pushLog(`Action: ${res.action}`);
-    })().catch((e) => pushLog(`ERR start: ${e}`));
+      pushTutor(res);
+    })().catch(console.error);
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
 
-  const rationale = result?.ui?.rationale || "";
-  const question = result?.ui?.question;
-  // const options = result?.ui?.options || [];
-
-  async function handleContinue() {
-    try {
-      const res = await nextStep(sessionId);
-      setResult(res);
-      setAnswer("");
-      pushLog(`Action: ${res.action}`);
-    } catch (e: any) {
-      pushLog(`ERR next: ${e.message || e}`);
-    }
+  function pushTutor(res: ApiResult) {
+    const t: TutorTurn = {
+      role: "tutor",
+      text: tutorTextFromResult(res),
+      rationale: res.ui?.rationale,
+      confidence: (res.confidence as any) || undefined,
+      options: res.ui?.options || [],
+      question: res.ui?.question,
+      graded: res.graded || null,
+    };
+    setTurns((prev) => [...prev, t]);
   }
 
-  async function handleDiagnosticChoice(yes: boolean) {
+  function pushStudent(text: string) {
+    const s: StudentTurn = { role: "student", text };
+    setTurns((prev) => [...prev, s]);
+  }
+
+  async function handleOption(label: string) {
     try {
+      setBusy(true);
+      pushStudent(label);
       const res = await ingest({
         session_id: sessionId,
         action: "continue",
-        message: yes ? "diagnostic_yes" : "diagnostic_no",
+        message: label,
       });
-      setResult(res);
-      pushLog(`Diagnostic choice: ${yes ? "Yes" : "No"} → ${res.action}`);
-    } catch (e: any) {
-      pushLog(`ERR diag: ${e.message || e}`);
+      pushTutor(res);
+    } finally {
+      setBusy(false);
     }
   }
 
-  async function submitAnswer() {
-    if (!question) return;
+  async function handleAnswer(choice: string, qid: string) {
     try {
+      setBusy(true);
+      pushStudent(choice);
       const graded = await ingest({
         session_id: sessionId,
         action: "answer",
-        question_id: question.id,
-        answer: answer,
+        question_id: qid,
+        answer: choice,
       });
-      setResult(graded);
-      pushLog(`Answer submitted (${answer}). Next action: ${graded.action}`);
-    } catch (e: any) {
-      pushLog(`ERR answer: ${e.message || e}`);
+      pushTutor(graded);
+
+      // and drive the next step
+      const nextRes = await nextStep(sessionId);
+      pushTutor(nextRes);
+    } finally {
+      setBusy(false);
     }
+  }
+
+  async function handleFreeTextSend() {
+    if (!input.trim()) return;
+    const msg = input.trim();
+    setInput("");
+    pushStudent(msg);
+
+    // Treat free text as content request
+    const res = await ingest({
+      session_id: sessionId,
+      action: "content_only",
+      message: msg,
+    });
+    pushTutor(res);
   }
 
   async function handleReset() {
+    setBusy(true);
     try {
       await resetSession(sessionId);
-      setLog([]);
-      setResult(null);
-      setAnswer("");
-      // soft-reload app state
+      setTurns([]);
       const res = await ingest({ session_id: sessionId, action: "start" });
-      setResult(res);
-      pushLog("Session reset");
-      pushLog(`Action: ${res.action}`);
-    } catch (e: any) {
-      pushLog(`ERR reset: ${e.message || e}`);
+      pushTutor(res);
+    } finally {
+      setBusy(false);
     }
   }
 
   return (
-    <div className="h-screen grid grid-cols-12 gap-3 p-3 bg-gray-50">
-      {/* Left: Chat / Controls */}
-      <div className="col-span-4 bg-white border rounded p-3 flex flex-col">
-        <div className="font-semibold mb-2">Controls</div>
-        <div className="flex gap-2">
-          <button onClick={handleContinue} className="px-3 py-1 bg-blue-600 text-white rounded">
-            Continue
-          </button>
-          <button onClick={() => handleDiagnosticChoice(true)} className="px-3 py-1 bg-green-600 text-white rounded">
-            Diagnostic: Yes
-          </button>
-          <button onClick={() => handleDiagnosticChoice(false)} className="px-3 py-1 bg-yellow-600 text-white rounded">
-            Diagnostic: No
-          </button>
-          <button onClick={handleReset} className="px-3 py-1 bg-gray-600 text-white rounded">
-            Reset
-          </button>
-        </div>
-
-        <div className="mt-4">
-          <div className="text-sm text-gray-600 mb-1">Log</div>
-          <div className="h-64 overflow-auto border rounded p-2 text-sm bg-gray-50">
-            {log.map((l, i) => (
-              <div key={i}>{l}</div>
-            ))}
-          </div>
-        </div>
-      </div>
-
-      {/* Middle: Rationale */}
-      <div className="col-span-5 bg-white border rounded p-3">
-        <div className="font-semibold mb-2">Rationale</div>
-        <div className="whitespace-pre-wrap text-sm">{rationale || "—"}</div>
-
-        {/* Question (if any) */}
-        {question && (
-          <div className="mt-4">
-            <div className="font-semibold mb-1">Question</div>
-            <div className="mb-2">{question.prompt}</div>
-            {Array.isArray(question.choices) && (
-              <select
-                className="border rounded p-2"
-                value={answer}
-                onChange={(e) => setAnswer(e.target.value)}
-              >
-                <option value="">Select your answer</option>
-                {question.choices.map((c) => (
-                  <option key={c} value={c}>{c}</option>
-                ))}
-              </select>
-            )}
-            <button
-              onClick={submitAnswer}
-              disabled={!answer}
-              className="ml-2 px-3 py-1 bg-indigo-600 text-white rounded disabled:opacity-50"
-            >
-              Submit
-            </button>
-          </div>
-        )}
-      </div>
-
-      {/* Right: Skill nodes (very simple list for now) */}
-      <div className="col-span-3 bg-white border rounded p-3">
-        <div className="font-semibold mb-2">Skill Nodes</div>
-        <SkillList focus={result?.next_node || ""} />
-      </div>
-    </div>
-  );
-}
-
-function SkillList({ focus }: { focus: string }) {
-  const nodes = useMemo(
-    () => [
-      { id: "prereq.math.basics", title: "Math Basics" },
-      { id: "prereq.algorithms.vocab", title: "Algorithmic Vocabulary" },
-      { id: "core.bigO.time", title: "Time Complexity (Big O)" },
-      { id: "core.bigO.space", title: "Space Complexity (Big O)" },
-    ],
-    []
-  );
-  return (
-    <ul className="space-y-1">
-      {nodes.map((n) => (
-        <li
-          key={n.id}
-          className={`px-2 py-1 rounded ${
-            focus === n.id ? "bg-blue-50 border border-blue-300" : "bg-gray-50 border"
-          }`}
+    <div className="h-screen grid grid-cols-[260px_1fr_320px] gap-3 p-3 bg-gray-50 text-gray-900">
+      {/* Left Nav */}
+      <aside className="bg-white border rounded p-3">
+        <div className="font-semibold mb-3">New Chat</div>
+        <button
+          onClick={handleReset}
+          disabled={busy}
+          className="w-full px-3 py-2 rounded bg-blue-600 text-white disabled:opacity-50"
         >
-          {/* <div className="text-xs text-gray-500">{n.id}</div> */}
-          <div className="text-sm">{n.title}</div>
-        </li>
-      ))}
-    </ul>
+          Start new session
+        </button>
+
+        <div className="mt-6 font-semibold mb-2">Courses</div>
+        <div className="space-y-2 text-sm">
+          <div className="px-3 py-2 rounded bg-blue-50 border border-blue-200">
+            Data Structures & Algorithms
+          </div>
+          <div className="px-3 py-2 rounded bg-gray-50 border">Statistics</div>
+          <div className="px-3 py-2 rounded bg-gray-50 border">Python Foundations</div>
+        </div>
+      </aside>
+
+      {/* Chat */}
+      <main className="bg-white border rounded flex flex-col">
+        <div className="flex-1 overflow-auto">
+          <ChatTimeline turns={turns} onOption={handleOption} onAnswer={handleAnswer} />
+        </div>
+        <div className="border-t p-3 flex gap-2">
+          <input
+            className="flex-1 border rounded px-3 py-2"
+            placeholder="Ask your AI Tutor a question…"
+            value={input}
+            onChange={(e) => setInput(e.target.value)}
+            onKeyDown={(e) => e.key === "Enter" && handleFreeTextSend()}
+            aria-label="Message input"
+          />
+          <button
+            onClick={handleFreeTextSend}
+            disabled={busy || !input.trim()}
+            className="px-4 py-2 rounded bg-blue-600 text-white disabled:opacity-50"
+          >
+            Send
+          </button>
+        </div>
+      </main>
+
+      {/* Skill Drawer */}
+      <aside className="bg-white border rounded p-3">
+        <div className="font-semibold mb-2">Skill Focus</div>
+        <ul className="space-y-2 text-sm">
+          <li className="px-2 py-2 rounded bg-blue-50 border border-blue-200">Math Basics</li>
+          <li className="px-2 py-2 rounded bg-gray-50 border">Algorithmic Vocabulary</li>
+          <li className="px-2 py-2 rounded bg-gray-50 border">Time Complexity (Big O)</li>
+          <li className="px-2 py-2 rounded bg-gray-50 border">Space Complexity (Big O)</li>
+        </ul>
+      </aside>
+    </div>
   );
 }

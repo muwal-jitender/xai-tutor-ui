@@ -1,3 +1,4 @@
+import SafeMarkdown from "./SafeMarkdown";
 import { useState } from "react";
 
 type Props = {
@@ -43,7 +44,8 @@ export default function WhyPill({ confidence, rationale }: Props) {
               id="why-details"
               className="ml-2 text-xs text-gray-700 max-w-prose"
             >
-              {rationale}
+              <SafeMarkdown markdown={rationale} />
+              {/* {rationale} */}
             </div>
           )}
         </>

@@ -1,3 +1,4 @@
+import SafeMarkdown from "./SafeMarkdown";
 import type { TutorTurn } from "../types";
 import WhyPill from "./WhyPill";
 
@@ -16,7 +17,9 @@ export default function MessageTutor({
         <div className="shrink-0 w-7 h-7 rounded-full bg-blue-600" aria-hidden />
         <div className="max-w-3xl">
           <div className="font-semibold">Tutor</div>
-          <div className="mt-1 whitespace-pre-wrap">{turn.text}</div>
+          <div className="mt-1">
+          <SafeMarkdown markdown={turn.text} />
+        </div>
 
           <WhyPill confidence={turn.confidence} rationale={turn.rationale} />
 
